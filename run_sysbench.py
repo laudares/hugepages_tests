@@ -4,11 +4,15 @@ import os, time
 
 # Settings
 
-db = 'postgresql'  # FIXME: 'mysql' or 'postgresql'
+db = 'mysql'  # FIXME: 'mysql' or 'postgresql'
 
 db_name = 'sysbench'
 db_user = 'sysbench'
 db_pass = 'sysbench'
+db_conn_type = 'socket'  # 'socket' (with MySQL on localhost) or 'tcp'
+db_host = 'localhost'
+db_port = {'mysql': 3306, 'postgresql': 5432}
+db_socket = {'mysql':'/var/run/mysqld/mysqld.sock', 'postgresql': '/var/run/postgresql/.s.PGSQL.5432'}
 
 sysbench_bin = '/usr/local/bin/sysbench'
 sysbench_tpcc_dir = '/home/fernando/sysbench-tpcc'
@@ -24,6 +28,10 @@ datadir = { 'mysql': '/data/sam/mysql', 'postgresql': '/data/sam/postgresql' }
 base_data = { 'mysql': '/home/fernando/base_datadir-90G', 'postgresql': '/home/fernando/base_postgresql' }
 base_results = '/home/fernando/results'
 
+perf_stat = '/usr/bin/perf stat -e dTLB-loads,dTLB-load-misses,iTLB-load-misses'
+
+recycle_datadir = True
+
 comp_conf_file = {
   'mysql': '/etc/mysql/conf.d/comp.cnf',
   'postgresql': '/etc/postgresql/10/main/conf.d/comp.conf'
@@ -31,11 +39,11 @@ comp_conf_file = {
 
 cache_sizes = ['96G', '48G']
 hugepages_pool = { 
-  '2M': {'96G': 51200, '48G': 25600},  # 100G-->102400M/2M=51200 | 50G-->25600 
+  '2M': {'96G': 51472, '48G': 25736},  # 51472-->100.53GB | 25736-->50.27GB
   '1G': {'96G': 100, '48G': 50}
 }
 chunk_size = {
-  '2M': {'96G': '1G', '48G': '1G'},
+  #'2M': {'96G': '1G', '48G': '1G'},
   '1G': {'96G': '4G', '48G': '6G'}
 }
 
@@ -44,13 +52,13 @@ os.system("""sudo sh -c 'echo never > /sys/kernel/mm/transparent_hugepage/enable
 os.system("""sudo sh -c 'echo never > /sys/kernel/mm/transparent_hugepage/defrag'""")
 
 # Allowing database OS user to use huge pages
-os.system("""sudo sh -c 'echo %i > /proc/sys/vm/hugetlb_shm_group'""" % gid[db])
+os.system("""sudo sh -c 'echo %i > /proc/sys/vm/hugetlb_shm_group'""" % gid[db])  # FIXME: Does not seem necessary for MySQL or PG: is it due to have set 'infinity' limits ? To be validated
 
 # Run tests with and without NUMA (in fact, with interleaved memory across nodes)
-for numa_interleave in ['off']:  # ['on', 'off']:
+for numa_interleave in ['on']:  # ['on', 'off']:
 
   # Run tests with different page sizes (note the kernel must have support for a particular page size)
-  for page_size in ['4K', '2M']:  #['4K', '2M', '1G']: # FIXME - ATTENTION: large page size can only be changed at boot time!
+  for page_size in ['2M', '4K']:  #['4K', '2M', '1G']: # FIXME - ATTENTION: large page size can only be changed at boot time!
 
     # Run tests with different cache sizes
     for cache in cache_sizes:
@@ -59,7 +67,7 @@ for numa_interleave in ['off']:  # ['on', 'off']:
         os.system("""sudo sh -c 'echo "[mysqld]" > %s'""" % comp_conf_file[db] )
         os.system("""sudo sh -c 'echo "innodb_buffer_pool_size = %s" >> %s'""" % (cache, comp_conf_file[db]))
         # Configure BP chunk size for large pages
-        if page_size in ['2M', '1G']:
+        if page_size in ['1G']:
           os.system("""sudo sh -c 'echo "innodb_buffer_pool_chunk_size = %s" >> %s'""" % (chunk_size[page_size][cache], comp_conf_file[db]))
       else:  # pg
         os.system("""sudo sh -c 'echo "shared_buffers = %sB" > %s'""" % (cache, comp_conf_file[db]))  # FIXME: PostgreSQL only understands 'GB', not 'G'
@@ -97,9 +105,10 @@ for numa_interleave in ['off']:  # ['on', 'off']:
         os.system("sudo service %s stop" % db)
 
         # recycle datadir
-        os.system("sudo rm -fr %s/*" % datadir[db])
-        os.system("sudo cp -r %s/* %s" % (base_data[db], datadir[db]))
-        os.system("sudo chown %s:%s -R %s" % (user[db], user[db], datadir[db]))
+        if recycle_datadir:
+          os.system("sudo rm -fr %s/*" % datadir[db])
+          os.system("sudo cp -r %s/* %s" % (base_data[db], datadir[db]))
+          os.system("sudo chown %s:%s -R %s" % (user[db], user[db], datadir[db]))
 
         # drop OS cache
         os.system("sudo sh -c 'echo 3 >/proc/sys/vm/drop_caches'")
@@ -114,7 +123,13 @@ for numa_interleave in ['off']:  # ['on', 'off']:
           os.system("""psql -U %s -c "SELECT datname, pg_size_pretty(pg_database_size(datname)), blks_read, blks_hit, temp_files, temp_bytes from pg_stat_database where datname='%s'" > %s/%s/%s-pre.out""" % (db_user, db_name, base_results, db, prefix))
 
         # run sysbench-tpcc
-        cmd_sysbench = "cd %s && /usr/bin/env %s tpcc.lua --db-driver=%s --%s-db=%s --%s-user=%s --%s-password=%s --threads=%i --report-interval=1 --tables=%i --scale=%i --use_fk=0 --trx_level=RC --time=%i run > %s/%s/%s-run.out" % (sysbench_tpcc_dir, sysbench_bin, sysbench_driver[db], sysbench_driver[db], db_name, sysbench_driver[db], db_user, sysbench_driver[db], db_pass, num_threads, sysbench_tables, sysbench_scale, sysbench_time, base_results, db, prefix)
+        if (db is 'mysql') and (db_conn_type is 'socket'):
+          db_comp = '--mysql-socket=%s' % db_socket[db]
+        else:
+          db_comp = '--%s-port=%s' % (sysbench_driver[db], db_port[db])
+          
+        cmd_sysbench = "cd %s && /usr/bin/env %s %s tpcc.lua --db-driver=%s --%s-host=%s %s --%s-db=%s --%s-user=%s --%s-password=%s --threads=%i --report-interval=1 --tables=%i --scale=%i --use_fk=0 --trx_level=RC --time=%i run 1> %s/%s/%s-run.out 2> %s/%s/%s-perf.out" % (sysbench_tpcc_dir, perf_stat, sysbench_bin, sysbench_driver[db], sysbench_driver[db], db_host, db_comp, sysbench_driver[db], db_name, sysbench_driver[db], db_user, sysbench_driver[db], db_pass, num_threads, sysbench_tables, sysbench_scale, sysbench_time, base_results, db, prefix, base_results, db, prefix)
+
         print cmd_sysbench
         os.system(cmd_sysbench)
 
@@ -126,5 +141,5 @@ for numa_interleave in ['off']:  # ['on', 'off']:
           os.system("""psql -U %s -c "SELECT datname, pg_size_pretty(pg_database_size(datname)), blks_read, blks_hit, temp_files, temp_bytes from pg_stat_database where datname='%s'" > %s/%s/%s-post.out""" % (db_user, db_name, base_results, db, prefix)) 
           
         # break before next iteration
-        time.sleep(300)
+        time.sleep(120)
 
