@@ -20,7 +20,7 @@ sysbench_driver = {'mysql': 'mysql', 'postgresql': 'pgsql'}
 sysbench_tables = 10
 sysbench_scale = 100
 sysbench_time = 3600
-sysbench_threads = [56, 112, 224, 448, 896]
+sysbench_threads = [56, 112, 224, 448]  #, 896]
 
 gid = { 'mysql': 1001, 'postgresql': 121 }
 user = { 'mysql': 'mysql', 'postgresql': 'postgres' }
@@ -32,24 +32,27 @@ perf_stat = '/usr/bin/perf stat -e dTLB-loads,dTLB-load-misses,iTLB-load-misses'
 
 recycle_datadir = True
 
+THP = False
+
 comp_conf_file = {
   'mysql': '/etc/mysql/conf.d/comp.cnf',
   'postgresql': '/etc/postgresql/10/main/conf.d/comp.conf'
 }
 
-cache_sizes = ['96G', '48G']
+cache_sizes = ['24G', '96G']  # 48?
 hugepages_pool = { 
-  '2M': {'96G': 51472, '48G': 25736},  # 51472-->100.53GB | 25736-->50.27GB
-  '1G': {'96G': 100, '48G': 50}
+  '2M': {'96G': 51472, '24G': 12868},  # 51472-->100.53GB | 25736-->50.27GB | 12868-->25.13G
+  '1G': {'96G': 193, '24G': 49}
 }
 chunk_size = {
   #'2M': {'96G': '1G', '48G': '1G'},
-  '1G': {'96G': '4G', '48G': '6G'}
+  '1G': {'96G': '1G', '24G': '1G'}
 }
 
 # Disable Transparent Huge Pages (THP):
-os.system("""sudo sh -c 'echo never > /sys/kernel/mm/transparent_hugepage/enabled'""")
-os.system("""sudo sh -c 'echo never > /sys/kernel/mm/transparent_hugepage/defrag'""")
+if not THP:
+  os.system("""sudo sh -c 'echo never > /sys/kernel/mm/transparent_hugepage/enabled'""")
+  os.system("""sudo sh -c 'echo never > /sys/kernel/mm/transparent_hugepage/defrag'""")
 
 # Allowing database OS user to use huge pages
 os.system("""sudo sh -c 'echo %i > /proc/sys/vm/hugetlb_shm_group'""" % gid[db])  # FIXME: Does not seem necessary for MySQL or PG: is it due to have set 'infinity' limits ? To be validated
@@ -58,7 +61,7 @@ os.system("""sudo sh -c 'echo %i > /proc/sys/vm/hugetlb_shm_group'""" % gid[db])
 for numa_interleave in ['on']:  # ['on', 'off']:
 
   # Run tests with different page sizes (note the kernel must have support for a particular page size)
-  for page_size in ['2M', '4K']:  #['4K', '2M', '1G']: # FIXME - ATTENTION: large page size can only be changed at boot time!
+  for page_size in ['1G']:  #['4K', '2M', '1G']: # FIXME - ATTENTION: large page size can only be changed at boot time!
 
     # Run tests with different cache sizes
     for cache in cache_sizes:
